@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Never commit OAuth credentials or tokens
+client_secret.json
+token.json
+
+# Test media
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wmv
+*.flv
+*.webm
