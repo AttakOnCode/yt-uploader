@@ -248,8 +248,24 @@ def add_to_playlist(api, video_id, playlist_id):
     print(f"Added to playlist {playlist_id}")
 
 
+def list_playlists(api, max_results=50):
+    resp = api.playlists().list(
+        part="snippet", mine=True, maxResults=max_results
+    ).execute()
+    return [
+        (p["id"], p["snippet"]["title"])
+        for p in resp.get("items", [])
+    ]
+
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def main():
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = app_dir()
     parser = argparse.ArgumentParser(
         description="Upload videos to YouTube.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -286,6 +302,11 @@ def main():
     )
     parser.add_argument("--thumbnail", help="Path to thumbnail image (recommended 1280x720)")
     parser.add_argument("--playlist", help="Playlist ID to add the video to")
+    parser.add_argument(
+        "--list-playlists",
+        action="store_true",
+        help="List your playlists (ID and title) and exit",
+    )
     parser.add_argument(
         "--chunk",
         type=int,
@@ -324,6 +345,11 @@ def main():
 
     creds = get_credentials(args.client_secret, args.token)
     api = build("youtube", "v3", credentials=creds)
+
+    if args.list_playlists:
+        for pid, title in list_playlists(api):
+            print(f"{pid}\t{title}")
+        sys.exit(0)
 
     if args.category == "pick" or (args.pick_category and not args.category):
         args.category = pick_category(api, args.video)

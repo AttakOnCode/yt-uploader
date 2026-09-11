@@ -2,13 +2,16 @@
 """Tkinter GUI for scheduling and uploading videos to YouTube."""
 
 import os
+import sys
 import threading
 import tkinter as tk
 from datetime import datetime, timezone
 from tkinter import filedialog, messagebox, ttk
 
 from upload_video import (
+    add_to_playlist,
     get_credentials,
+    list_playlists,
     parse_publish_at,
     publish_video,
     PRIVACY_CHOICES,
@@ -22,6 +25,12 @@ VIDEO_FILETYPES = [
     ("Video files", "*.mp4 *.mov *.avi *.mkv *.wmv *.flv *.webm"),
     ("All files", "*.*"),
 ]
+
+
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def utc_to_local_display(iso_str):
@@ -51,6 +60,8 @@ class EditDialog(tk.Toplevel):
         current_description="",
         current_privacy="private",
         current_kids=False,
+        playlists=None,
+        current_playlist_id=None,
     ):
         super().__init__(parent)
         self.title("Edit Video")
@@ -106,6 +117,25 @@ class EditDialog(tk.Toplevel):
             vis_row, text="Made for kids", variable=self.kids_var
         ).pack(side="left")
 
+        self.playlist_map = {title: pid for pid, title in (playlists or [])}
+        self.playlist_var = tk.StringVar(value="(None)")
+        if current_playlist_id is not None:
+            for title, pid in self.playlist_map.items():
+                if pid == current_playlist_id:
+                    self.playlist_var.set(title)
+                    break
+
+        playlist_row = ttk.Frame(self)
+        playlist_row.grid(row=5, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
+        ttk.Label(playlist_row, text="Playlist:").pack(side="left")
+        ttk.Combobox(
+            playlist_row,
+            textvariable=self.playlist_var,
+            values=["(None)"] + list(self.playlist_map.keys()),
+            width=28,
+            state="readonly",
+        ).pack(side="left", padx=(4, 0))
+
         from tkcalendar import Calendar
 
         if current_publish:
@@ -122,7 +152,7 @@ class EditDialog(tk.Toplevel):
             default_period = "AM"
 
         self.sched_frame = ttk.Frame(self)
-        self.sched_frame.grid(row=5, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
+        self.sched_frame.grid(row=6, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
 
         self.calendar = Calendar(
             self.sched_frame,
@@ -167,16 +197,16 @@ class EditDialog(tk.Toplevel):
             value=f"Selected: {default_date.strftime('%b %d, %Y')}"
         )
         self.sel_label = ttk.Label(self, textvariable=self.sel_date_var, foreground="gray")
-        self.sel_label.grid(row=6, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        self.sel_label.grid(row=7, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
         self.calendar.bind("<<CalendarSelected>>", self._calendar_changed)
 
         self.sched_note = ttk.Label(
             self, text="Choose a date and time.", foreground="gray"
         )
-        self.sched_note.grid(row=7, column=0, columnspan=3, padx=padx, pady=(8, 0))
+        self.sched_note.grid(row=8, column=0, columnspan=3, padx=padx, pady=(8, 0))
 
         btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=8, column=0, columnspan=3, pady=14)
+        btn_frame.grid(row=9, column=0, columnspan=3, pady=14)
         ttk.Button(btn_frame, text="Save", command=self._save).pack(side="left", padx=4)
         ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
 
@@ -256,6 +286,188 @@ class EditDialog(tk.Toplevel):
             "privacy": privacy,
             "publish_at": publish,
             "kids": bool(self.kids_var.get()),
+            "playlist_id": self.playlist_map.get(self.playlist_var.get()),
+        }
+        self.destroy()
+
+
+class BulkEditDialog(tk.Toplevel):
+    VISIBILITY_CHOICES = ["Public", "Unlisted", "Private", "Scheduled"]
+
+    def __init__(self, parent, count, playlists=None):
+        super().__init__(parent)
+        self.title(f"Edit {count} Videos")
+        self.resizable(False, False)
+        self.result = None
+        self.transient(parent)
+        self.after(10, self._grab_safely)
+
+        padx, pady = 16, 6
+
+        ttk.Label(self, text="Edit Multiple Videos", style="Header.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", padx=padx, pady=(16, 4)
+        )
+        ttk.Label(
+            self,
+            text=f"{count} videos selected. Settings below apply to all of them.",
+            foreground="gray",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=padx, pady=(0, 8))
+
+        self.visibility_var = tk.StringVar(value="Private")
+        self.kids_var = tk.BooleanVar(value=False)
+
+        vis_row = ttk.Frame(self)
+        vis_row.grid(row=2, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
+        ttk.Label(vis_row, text="Visibility:").pack(side="left")
+        self.visibility_combo = ttk.Combobox(
+            vis_row,
+            textvariable=self.visibility_var,
+            values=self.VISIBILITY_CHOICES,
+            width=12,
+            state="readonly",
+        )
+        self.visibility_combo.pack(side="left", padx=(4, 18))
+        self.visibility_combo.bind("<<ComboboxSelected>>", self._toggle_schedule)
+        ttk.Checkbutton(
+            vis_row, text="Made for kids", variable=self.kids_var
+        ).pack(side="left")
+
+        self.playlist_map = {title: pid for pid, title in (playlists or [])}
+        self.playlist_var = tk.StringVar(value="(None)")
+
+        playlist_row = ttk.Frame(self)
+        playlist_row.grid(row=3, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
+        ttk.Label(playlist_row, text="Playlist:").pack(side="left")
+        ttk.Combobox(
+            playlist_row,
+            textvariable=self.playlist_var,
+            values=["(None)"] + list(self.playlist_map.keys()),
+            width=28,
+            state="readonly",
+        ).pack(side="left", padx=(4, 0))
+
+        from tkcalendar import Calendar
+
+        default_date = datetime.now().date()
+
+        self.sched_frame = ttk.Frame(self)
+        self.sched_frame.grid(row=4, column=0, columnspan=3, sticky="w", padx=padx, pady=(8, 0))
+
+        self.calendar = Calendar(
+            self.sched_frame,
+            selectmode="day",
+            firstweekday="monday",
+            showweeknumbers=False,
+            background="darkblue",
+            foreground="white",
+            fieldbackground="white",
+            mindate=datetime.now().date(),
+            year=default_date.year,
+            month=default_date.month,
+            day=default_date.day,
+        )
+        self.calendar.pack(side="left")
+
+        time_frame = ttk.Frame(self.sched_frame)
+        time_frame.pack(side="left", padx=(14, 0))
+
+        self.hour_var = tk.StringVar(value="09")
+        self.minute_var = tk.StringVar(value="00")
+        self.period_var = tk.StringVar(value="AM")
+        ttk.Label(time_frame, text="Time:").pack(anchor="w")
+        ttk.Label(time_frame, text="").pack()
+        time_row = ttk.Frame(time_frame)
+        time_row.pack(anchor="w")
+        self.hour_combo = ttk.Combobox(
+            time_row, textvariable=self.hour_var, values=[f"{h}" for h in range(1, 13)], width=4, state="readonly"
+        )
+        self.hour_combo.pack(side="left")
+        ttk.Label(time_row, text=":").pack(side="left", padx=2)
+        self.minute_combo = ttk.Combobox(
+            time_row, textvariable=self.minute_var, values=[f"{m:02d}" for m in range(60)], width=4, state="readonly"
+        )
+        self.minute_combo.pack(side="left")
+        self.period_combo = ttk.Combobox(
+            time_row, textvariable=self.period_var, values=["AM", "PM"], width=4, state="readonly"
+        )
+        self.period_combo.pack(side="left", padx=(4, 0))
+
+        self.sel_date_var = tk.StringVar(
+            value=f"Selected: {default_date.strftime('%b %d, %Y')}"
+        )
+        self.sel_label = ttk.Label(self, textvariable=self.sel_date_var, foreground="gray")
+        self.sel_label.grid(row=5, column=1, sticky="w", padx=(4, 0), pady=(4, 0))
+        self.calendar.bind("<<CalendarSelected>>", self._calendar_changed)
+
+        self.sched_note = ttk.Label(
+            self, text="Choose a date and time.", foreground="gray"
+        )
+        self.sched_note.grid(row=6, column=0, columnspan=3, padx=padx, pady=(8, 0))
+
+        btn_frame = ttk.Frame(self)
+        btn_frame.grid(row=7, column=0, columnspan=3, pady=14)
+        ttk.Button(btn_frame, text="Apply", command=self._save).pack(side="left", padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=4)
+
+        self._toggle_schedule()
+        self._center_on_parent()
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _grab_safely(self, attempts=10):
+        try:
+            self.grab_set()
+        except tk.TclError:
+            if attempts:
+                self.after(50, lambda: self._grab_safely(attempts - 1))
+
+    def _toggle_schedule(self, event=None):
+        show = self.visibility_var.get() == "Scheduled"
+        for widget in (self.sched_frame, self.sel_label, self.sched_note):
+            if show:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+    def _center_on_parent(self):
+        self.update_idletasks()
+        parent = self.master
+        x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_reqwidth()) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_reqheight()) // 2
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+
+    def _calendar_changed(self, event=None):
+        date = self.calendar.selection_get()
+        if date:
+            self.sel_date_var.set(f"Selected: {date.strftime('%b %d, %Y')}")
+
+    def _save(self):
+        visibility = self.visibility_var.get()
+        publish = None
+        privacy = visibility.lower()
+        if visibility == "Scheduled":
+            privacy = "private"
+            sel = self.calendar.selection_get()
+            if sel is None:
+                messagebox.showerror("No date selected", "Click a day on the calendar.", parent=self)
+                return
+            date = sel.strftime("%Y-%m-%d")
+            hour = int(self.hour_var.get())
+            if self.period_var.get() == "PM" and hour != 12:
+                hour += 12
+            elif self.period_var.get() == "AM" and hour == 12:
+                hour = 0
+            time_ = f"{hour:02d}:{self.minute_var.get()}"
+            try:
+                publish = local_input_to_utc(date, time_)
+            except ValueError as exc:
+                messagebox.showerror("Invalid date/time", str(exc), parent=self)
+                return
+        self.result = {
+            "visibility": visibility,
+            "privacy": privacy,
+            "publish_at": publish,
+            "kids": bool(self.kids_var.get()),
+            "playlist_id": self.playlist_map.get(self.playlist_var.get()),
         }
         self.destroy()
 
@@ -267,14 +479,18 @@ class UploaderApp:
         self.root.geometry("820x520")
         self.root.minsize(700, 400)
         self.api = None
+        self.playlists = []
+        self.playlist_map = {}
         self.meta = {}
+        self._date_sort_active = False
 
-        here = os.path.dirname(os.path.abspath(__file__))
+        here = app_dir()
         self.client_secret = os.path.join(here, "client_secret.json")
         self.token = os.path.join(here, "token.json")
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
+        self._set_auth("authenticating", "Authenticating")
         threading.Thread(target=self._auth_worker, daemon=True).start()
 
     def _build_ui(self):
@@ -290,6 +506,12 @@ class UploaderApp:
         ttk.Label(header, text="YouTube Uploader", style="Header.TLabel").pack(side="left")
         ttk.Label(header, text="Select videos, set visibility, upload.", style="Sub.TLabel").pack(side="left", padx=(12, 0))
 
+        self.dot_canvas = tk.Canvas(header, width=14, height=14, highlightthickness=0, bg="#1c1c1c")
+        self.dot = self.dot_canvas.create_oval(2, 2, 12, 12, fill="gray", outline="")
+        self.dot_canvas.pack(side="right", padx=(0, 2))
+        self.auth_var = tk.StringVar(value="Authenticating")
+        ttk.Label(header, textvariable=self.auth_var, style="Sub.TLabel").pack(side="right")
+
         ttk.Separator(self.root, orient="horizontal").pack(side="top", fill="x", padx=8)
 
         toolbar = ttk.Frame(self.root, padding=(8, 8))
@@ -299,6 +521,8 @@ class UploaderApp:
         ttk.Button(toolbar, text="Remove", command=self._remove_selected).pack(side="left", padx=2, pady=2)
         ttk.Button(toolbar, text="Edit schedule...", command=self._edit_selected).pack(side="left", padx=2, pady=2)
         ttk.Button(toolbar, text="Upload all", style="Accent.TButton", command=self._upload_all).pack(side="left", padx=(12, 2), pady=2)
+        self._date_sort_btn = ttk.Button(toolbar, text="Newest first", command=self._sort_by_date)
+        self._date_sort_btn.pack(side="right", padx=(0, 12), pady=2)
         ttk.Button(toolbar, text="Re-authenticate", command=self._re_auth).pack(side="right", padx=2, pady=2)
 
         tree_frame = ttk.Frame(self.root)
@@ -306,10 +530,10 @@ class UploaderApp:
 
         columns = ("video", "title", "schedule", "status")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
-        self.tree.heading("video", text="File")
-        self.tree.heading("title", text="Title")
-        self.tree.heading("schedule", text="Visibility / Schedule")
-        self.tree.heading("status", text="Status")
+        self.tree.heading("video", text="File", command=lambda: self._sort_by_column("video"))
+        self.tree.heading("title", text="Title", command=lambda: self._sort_by_column("title"))
+        self.tree.heading("schedule", text="Visibility / Schedule", command=self._sort_by_date)
+        self.tree.heading("status", text="Status", command=lambda: self._sort_by_column("status"))
         self.tree.column("video", width=180)
         self.tree.column("title", width=240)
         self.tree.column("schedule", width=200)
@@ -339,7 +563,10 @@ class UploaderApp:
                 "privacy": "private",
                 "publish_at": None,
                 "kids": False,
+                "playlist_id": None,
             }
+        if self._date_sort_active:
+            self._apply_date_sort()
 
     def _remove_selected(self):
         for item in self.tree.selection():
@@ -349,6 +576,12 @@ class UploaderApp:
     def _edit_selected(self):
         sel = self.tree.selection()
         if not sel:
+            return
+        if len(sel) > 1:
+            dlg = BulkEditDialog(self.root, len(sel), self.playlists)
+            self.root.wait_window(dlg)
+            if dlg.result:
+                self._apply_bulk(sel, dlg.result)
             return
         for item in sel:
             vid, title, sched, _ = self.tree.item(item, "values")
@@ -361,6 +594,8 @@ class UploaderApp:
                 info.get("description", ""),
                 info.get("privacy", "private"),
                 info.get("kids", False),
+                self.playlists,
+                info.get("playlist_id"),
             )
             self.root.wait_window(dlg)
             if dlg.result:
@@ -370,6 +605,7 @@ class UploaderApp:
                     "privacy": dlg.result["privacy"],
                     "publish_at": dlg.result["publish_at"],
                     "kids": dlg.result["kids"],
+                    "playlist_id": dlg.result["playlist_id"],
                 }
                 new_sched = dlg.result["publish_at"]
                 if new_sched:
@@ -377,6 +613,22 @@ class UploaderApp:
                 else:
                     display = dlg.result["visibility"]
                 self.tree.item(item, values=(vid, dlg.result["title"], display, "Queued"))
+                if self._date_sort_active:
+                    self._apply_date_sort()
+
+    def _apply_bulk(self, items, result):
+        for item in items:
+            info = dict(self.meta.get(item, {}))
+            info.update(result)
+            self.meta[item] = info
+            vid = self.tree.item(item, "values")[0]
+            if result["publish_at"]:
+                display = f"Scheduled {utc_to_local_display(result['publish_at'])}"
+            else:
+                display = result["visibility"]
+            self.tree.item(item, values=(vid, info.get("title", ""), display, "Queued"))
+        if self._date_sort_active:
+            self._apply_date_sort()
 
     def _upload_all(self):
         if self.api is None:
@@ -406,7 +658,7 @@ class UploaderApp:
             try:
                 def progress(pct, _iid=iid):
                     self._update_status(_iid, f"Uploading... {pct}%")
-                publish_video(
+                resp = publish_video(
                     self.api,
                     vid,
                     title,
@@ -416,6 +668,9 @@ class UploaderApp:
                     publish_at=publish_at,
                     progress_cb=progress,
                 )
+                playlist_id = info.get("playlist_id")
+                if resp.get("id") and playlist_id:
+                    add_to_playlist(self.api, resp["id"], playlist_id)
                 self._update_status(iid, "Done")
             except HttpError as exc:
                 detail = exc.error_details or []
@@ -441,21 +696,75 @@ class UploaderApp:
                             btn.configure(state=state)
         self.root.after(0, _apply)
 
+    def _sort_by_column(self, col):
+        self._date_sort_active = False
+        items = sorted(self.tree.get_children(), key=lambda i: str(self.tree.set(i, col)))
+        for idx, iid in enumerate(items):
+            self.tree.move(iid, "", idx)
+
+    def _sort_by_date(self):
+        self._date_sort_desc = not getattr(self, "_date_sort_desc", False)
+        self._date_sort_active = True
+        self._apply_date_sort()
+
+    def _apply_date_sort(self):
+        desc = getattr(self, "_date_sort_desc", False)
+        scheduled, unscheduled = [], []
+        for iid in self.tree.get_children():
+            pub = self.meta.get(iid, {}).get("publish_at")
+            if pub:
+                ts = datetime.fromisoformat(pub.replace("Z", "+00:00")).timestamp()
+                scheduled.append((ts, iid))
+            else:
+                unscheduled.append(iid)
+        scheduled.sort(reverse=desc)
+        ordered = [t for _, t in scheduled] + unscheduled
+        for idx, iid in enumerate(ordered):
+            self.tree.move(iid, "", idx)
+        self._date_sort_btn.configure(text="Oldest first" if desc else "Newest first")
+
+    def _set_auth(self, state, text=None):
+        colors = {
+            "connected": "#35c94b",
+            "failed": "#ff4d4d",
+            "authenticating": "#ffb020",
+        }
+        def _apply():
+            self.dot_canvas.itemconfigure(self.dot, fill=colors[state])
+            self.auth_var.set(text or state.title())
+        self.root.after(0, _apply)
+
     def _auth_worker(self):
         try:
             creds = get_credentials(self.client_secret, self.token)
             api = build("youtube", "v3", credentials=creds)
             self.api = api
+            self._load_playlists()
+            self._set_auth("connected", "Connected")
             self.root.after(0, lambda: self.status_var.set("Connected"))
         except Exception as exc:
+            self._set_auth("failed", "Not connected")
             self.root.after(
                 0, lambda e=exc: self.status_var.set(f"Auth failed: {e}")
             )
+
+    def _load_playlists(self):
+        if self.api is None:
+            return
+        try:
+            self.playlists = list_playlists(self.api)
+            self.playlist_map = {pid: title for pid, title in self.playlists}
+        except HttpError:
+            self.playlists = []
+            self.playlist_map = {}
 
     def _re_auth(self):
         if os.path.exists(self.token):
             os.remove(self.token)
         self.api = None
+        self.playlists = []
+        self.playlist_map = {}
+        self._set_auth("authenticating", "Authenticating")
         self.status_var.set("Authenticating...")
         threading.Thread(target=self._auth_worker, daemon=True).start()
 
